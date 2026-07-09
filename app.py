@@ -308,29 +308,55 @@ model_name = st.sidebar.text_input(
     value=default_models.get(provider, "")
 )
 
-# Retrieve keys from environment if loaded
+# Retrieve access password and environment API keys
+env_access_password = os.getenv("ACCESS_PASSWORD", "")
 env_google_key = os.getenv("GOOGLE_API_KEY", "")
 env_groq_key = os.getenv("GROQ_API_KEY", "")
 
+# Access Password verification (only required if configured in environment/secrets)
+access_granted = True
+if env_access_password:
+    user_password = st.sidebar.text_input(
+        "🔓 Access Password",
+        type="password",
+        help="Enter the dashboard password to unlock pre-configured keys."
+    )
+    access_granted = (user_password == env_access_password)
+    if not access_granted and user_password:
+        st.sidebar.error("❌ Incorrect Access Password")
+
 # API Key inputs
 if provider == "gemini":
-    google_key = st.sidebar.text_input(
+    custom_google_key = st.sidebar.text_input(
         "Gemini API Key",
-        value=env_google_key,
+        value="",  # Always empty to prevent credential leakage to client browsers
+        placeholder="Using pre-configured key..." if (env_google_key and access_granted) else "Enter your Gemini API Key...",
         type="password",
-        help="Google API Key. Leave blank if already set in environment."
+        help="Leave blank to use the system key (if access password is valid)."
     )
-    if google_key:
-        os.environ["GOOGLE_API_KEY"] = google_key
+    if custom_google_key:
+        os.environ["GOOGLE_API_KEY"] = custom_google_key
+    elif env_google_key and access_granted:
+        os.environ["GOOGLE_API_KEY"] = env_google_key
+    else:
+        # Clear/empty the environment variable if user cleared custom key or password is wrong/missing
+        os.environ["GOOGLE_API_KEY"] = ""
+
 elif provider == "groq":
-    groq_key = st.sidebar.text_input(
+    custom_groq_key = st.sidebar.text_input(
         "Groq API Key",
-        value=env_groq_key,
+        value="",  # Always empty to prevent credential leakage to client browsers
+        placeholder="Using pre-configured key..." if (env_groq_key and access_granted) else "Enter your Groq API Key...",
         type="password",
-        help="Groq API Key. Leave blank if already set in environment."
+        help="Leave blank to use the system key (if access password is valid)."
     )
-    if groq_key:
-        os.environ["GROQ_API_KEY"] = groq_key
+    if custom_groq_key:
+        os.environ["GROQ_API_KEY"] = custom_groq_key
+    elif env_groq_key and access_granted:
+        os.environ["GROQ_API_KEY"] = env_groq_key
+    else:
+        os.environ["GROQ_API_KEY"] = ""
+
 
 max_retries = st.sidebar.slider(
     "Max Leakage Retries",
