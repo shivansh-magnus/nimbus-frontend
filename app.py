@@ -9,9 +9,7 @@ import numpy as np
 import streamlit as st
 import json
 import urllib.request
-import streamlit as st
 from dotenv import load_dotenv
-from streamlit.web.server.websocket_headers import _get_websocket_headers
 
 # Ensure the local path is in sys.path so we can import automl_agents
 ROOT = Path(__file__).resolve().parent
@@ -31,9 +29,24 @@ if backend_env.exists():
     load_dotenv(backend_env)
 
 def collect_client_info():
-    """Extract visitor metadata from websocket connection headers."""
-    headers = _get_websocket_headers() or {}
+    """Extract visitor metadata from request headers with multiple fallbacks."""
+    headers = {}
     
+    # Try the official st.context API first (modern Streamlit)
+    if hasattr(st, "context") and hasattr(st.context, "headers"):
+        try:
+            headers = st.context.headers or {}
+        except Exception:
+            pass
+            
+    # Fallback to the legacy/internal websocket headers path
+    if not headers:
+        try:
+            from streamlit.web.server.websocket_headers import _get_websocket_headers
+            headers = _get_websocket_headers() or {}
+        except Exception:
+            pass
+            
     # Extract IP address (checking standard proxy forwarding headers)
     ip_address = headers.get("X-Forwarded-For", "")
     if not ip_address:
