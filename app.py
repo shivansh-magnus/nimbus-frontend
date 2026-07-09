@@ -14,10 +14,15 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Sibling backend path fallback
+BACKEND_DIR = Path("C:/Users/dwive/OneDrive/Desktop/nimbus")
+if BACKEND_DIR.exists() and str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 # Load environment variables
 load_dotenv(ROOT / ".env")
 # Fallback to backend .env if it exists
-backend_env = Path("C:/Users/dwive/OneDrive/Desktop/nimbus/.env")
+backend_env = BACKEND_DIR / ".env"
 if backend_env.exists():
     load_dotenv(backend_env)
 
@@ -134,6 +139,47 @@ html, body, [data-testid="stAppViewContainer"], .stWidget, .stMarkdown {
 /* Hide default streamlit elements for custom look */
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
+
+/* Executive report readability */
+.executive-report {
+    padding: 10px 0;
+}
+.executive-report p {
+    font-size: 1.08rem !important;
+    line-height: 1.85 !important;
+    color: #E2E8F0 !important;
+    margin-bottom: 1.4rem !important;
+}
+.executive-report li {
+    font-size: 1.08rem !important;
+    line-height: 1.85 !important;
+    color: #E2E8F0 !important;
+    margin-bottom: 0.8rem !important;
+}
+.executive-report h1, .executive-report h2, .executive-report h3, .executive-report h4 {
+    color: #FFFFFF !important;
+    margin-top: 2rem !important;
+    margin-bottom: 1rem !important;
+    font-weight: 700 !important;
+}
+.executive-report h1 {
+    font-size: 2.2rem !important;
+}
+.executive-report h2 {
+    font-size: 1.6rem !important;
+    border-bottom: 1px solid rgba(139, 127, 214, 0.2);
+    padding-bottom: 8px;
+}
+.executive-report h3 {
+    font-size: 1.25rem !important;
+}
+.executive-report code {
+    background-color: rgba(255, 255, 255, 0.08) !important;
+    color: #4FD6C4 !important;
+    padding: 3px 6px !important;
+    border-radius: 4px !important;
+    font-size: 0.95rem !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -145,7 +191,11 @@ try:
     backend_available = True
 except ImportError as e:
     backend_available = False
-    st.error(f"❌ Backend package `automl_agents` could not be loaded. Please ensure the backend is copied into the frontend repository directory. (Error: {e})")
+    st.error(
+        f"❌ Backend package `automl_agents` could not be loaded.\n\n"
+        f"We tried looking in the local directory and the backend sibling path `C:/Users/dwive/OneDrive/Desktop/nimbus`.\n\n"
+        f"Error: {e}"
+    )
 
 def generate_synthetic_churn_data(n_rows: int = 2000, seed: int = 42) -> pd.DataFrame:
     """Generate a synthetic churn dataset mirroring nimbus/scripts/generate_synthetic.py"""
@@ -481,14 +531,24 @@ if st.session_state.df is not None:
                                         if model_results:
                                             with st.expander("Show full leaderboard details"):
                                                 leaderboard = []
+                                                all_metrics = set()
                                                 for res in model_results:
-                                                    leaderboard.append({
-                                                        "Model": res.get("model_id"),
-                                                        "Metric": res.get("metric_name"),
-                                                        "CV Mean": f"{res.get('val_score_mean'):.4f}" if res.get('val_score_mean') is not None else "N/A",
-                                                        "CV Std": f"{res.get('val_score_std'):.4f}" if res.get('val_score_std') is not None else "N/A",
-                                                        "Tuned": "✅" if res.get("is_tuned") else "❌"
-                                                    })
+                                                    all_metrics.update(res.get("mean_scores", {}).keys())
+                                                
+                                                for res in model_results:
+                                                    row = {"Model": res.get("model_id")}
+                                                    mean_scores = res.get("mean_scores", {})
+                                                    std_scores = res.get("std_scores", {})
+                                                    for m in all_metrics:
+                                                        if m in mean_scores:
+                                                            m_mean = mean_scores[m]
+                                                            m_std = std_scores.get(m, 0.0)
+                                                            row[m.upper()] = f"{m_mean:.4f} ± {m_std:.4f}"
+                                                        else:
+                                                            row[m.upper()] = "N/A"
+                                                    is_tuned = res.get("is_tuned") or "best_params" in res or "(Tuned)" in res.get("model_id", "")
+                                                    row["Tuned"] = "✅" if is_tuned else "❌"
+                                                    leaderboard.append(row)
                                                 st.table(leaderboard)
                                                 
                                 elif node_name == "retry_supervisor":
@@ -533,16 +593,31 @@ if st.session_state.pipeline_completed and st.session_state.final_state is not N
         """, unsafe_allow_html=True)
         
     with m_col2:
-        # Find best validation score
+        # Find best validation score from the winning model
         best_score = "N/A"
         results = state.get("model_results", [])
-        if results:
-            # find candidate with best validation mean score
-            # (sort by val_score_mean descending)
-            valid_results = [r for r in results if r.get("val_score_mean") is not None]
-            if valid_results:
-                best_res = max(valid_results, key=lambda x: x.get("val_score_mean"))
-                best_score = f"{best_res.get('val_score_mean'):.4f} ({best_res.get('metric_name')})"
+        best_model_id = state.get("best_model_id")
+        if results and best_model_id:
+            winning_res = None
+            for r in results:
+                if r.get("model_id") == best_model_id:
+                    winning_res = r
+                    break
+            
+            if winning_res:
+                mean_scores = winning_res.get("mean_scores", {})
+                std_scores = winning_res.get("std_scores", {})
+                if "f1" in mean_scores:
+                    best_score = f"{mean_scores['f1']:.4f} ± {std_scores.get('f1', 0.0):.4f} (F1)"
+                elif "accuracy" in mean_scores:
+                    best_score = f"{mean_scores['accuracy']:.4f} ± {std_scores.get('accuracy', 0.0):.4f} (Accuracy)"
+                elif "r2" in mean_scores:
+                    best_score = f"{mean_scores['r2']:.4f} ± {std_scores.get('r2', 0.0):.4f} (R²)"
+                elif "rmse" in mean_scores:
+                    best_score = f"{mean_scores['rmse']:.4f} ± {std_scores.get('rmse', 0.0):.4f} (RMSE)"
+                elif mean_scores:
+                    metric = list(mean_scores.keys())[0]
+                    best_score = f"{mean_scores[metric]:.4f} ({metric})"
                 
         st.markdown(f"""
         <div class="metric-box">
@@ -579,9 +654,31 @@ if st.session_state.pipeline_completed and st.session_state.final_state is not N
             with open(report_path, "r", encoding="utf-8") as f:
                 report_content = f.read()
                 
-            # Render report
+            # Clean up absolute paths in report for presentation
+            display_content = report_content
+            import re
+            pattern = r'`[^`]*[/\\](runs[/\\]run_[^`]+model\.pkl)`'
+            display_content = re.sub(pattern, r'`\1`', display_content)
+            display_content = display_content.replace("\\", "/")
+            
+            # Formats long feature list comma-separated string into premium visual badges
+            def format_feature_list_as_badges(match):
+                count = match.group(1)
+                feats_str = match.group(2)
+                feats = [f.strip() for f in feats_str.split(",") if f.strip()]
+                badges_html = "".join([f'<span class="feature-badge">{f}</span>' for f in feats])
+                return f"""<div style="margin-bottom: 1.5rem; margin-top: 1rem;">
+    <strong style="color: #FFFFFF; font-size: 1.1rem; display: block; margin-bottom: 10px;">🎯 Selected {count} Features:</strong>
+    <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(139, 127, 214, 0.15); border-radius: 8px; padding: 12px 12px 6px 12px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center;">
+        {badges_html}
+    </div>
+</div>"""
+
+            display_content = re.sub(r'-\s+\*\*Selected\s+(\d+)\s+features\*\*:\s+(.*)', format_feature_list_as_badges, display_content)
+            
+            # Render report inside premium styled container
             st.markdown("### Executive Summary & Analysis")
-            st.markdown(report_content)
+            st.markdown(f'<div class="executive-report">\n\n{display_content}\n\n</div>', unsafe_allow_html=True)
             
             st.write("")
             st.download_button(
@@ -607,15 +704,25 @@ if st.session_state.pipeline_completed and st.session_state.final_state is not N
         model_results = state.get("model_results", [])
         if model_results:
             tbl_data = []
+            all_metrics = set()
             for res in model_results:
-                tbl_data.append({
-                    "Model ID": res.get("model_id"),
-                    "Optimization Metric": res.get("metric_name"),
-                    "CV Train Mean": f"{res.get('train_score_mean'):.5f}" if res.get('train_score_mean') is not None else "N/A",
-                    "CV Validation Mean": f"{res.get('val_score_mean'):.5f}" if res.get('val_score_mean') is not None else "N/A",
-                    "CV Val Std": f"{res.get('val_score_std'):.5f}" if res.get('val_score_std') is not None else "N/A",
-                    "Hyperparameters Tuned?": "Yes (Optuna)" if res.get("is_tuned") else "No (Default Parameters)"
-                })
+                all_metrics.update(res.get("mean_scores", {}).keys())
+            
+            for res in model_results:
+                row = {"Model ID": res.get("model_id")}
+                mean_scores = res.get("mean_scores", {})
+                std_scores = res.get("std_scores", {})
+                for m in all_metrics:
+                    if m in mean_scores:
+                        row[f"CV {m.upper()} Mean"] = f"{mean_scores[m]:.5f}"
+                        row[f"CV {m.upper()} Std"] = f"{std_scores.get(m, 0.0):.5f}"
+                    else:
+                        row[f"CV {m.upper()} Mean"] = "N/A"
+                        row[f"CV {m.upper()} Std"] = "N/A"
+                
+                is_tuned = res.get("is_tuned") or "best_params" in res or "(Tuned)" in res.get("model_id", "")
+                row["Hyperparameters Tuned?"] = "Yes (Optuna)" if is_tuned else "No (Default Parameters)"
+                tbl_data.append(row)
             st.dataframe(pd.DataFrame(tbl_data), use_container_width=True)
             
         # Download Pickle File
