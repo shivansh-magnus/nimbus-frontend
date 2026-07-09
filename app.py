@@ -7,7 +7,11 @@ import tempfile
 import pandas as pd
 import numpy as np
 import streamlit as st
+import json
+import urllib.request
+import streamlit as st
 from dotenv import load_dotenv
+from streamlit.web.server.websocket_headers import _get_websocket_headers
 
 # Ensure the local path is in sys.path so we can import automl_agents
 ROOT = Path(__file__).resolve().parent
@@ -25,6 +29,86 @@ load_dotenv(ROOT / ".env")
 backend_env = BACKEND_DIR / ".env"
 if backend_env.exists():
     load_dotenv(backend_env)
+
+def collect_client_info():
+    """Extract visitor metadata from websocket connection headers."""
+    headers = _get_websocket_headers() or {}
+    
+    # Extract IP address (checking standard proxy forwarding headers)
+    ip_address = headers.get("X-Forwarded-For", "")
+    if not ip_address:
+        ip_address = headers.get("Cf-Connecting-Ip", "127.0.0.1")
+        
+    if "," in ip_address:
+        ip_address = ip_address.split(",")[0].strip()
+        
+    user_agent = headers.get("User-Agent", "unknown")
+    
+    # Simple browser detection
+    browser = "Other"
+    if "Chrome" in user_agent and "Safari" in user_agent and "Edge" not in user_agent and "Edg" not in user_agent:
+        browser = "Chrome"
+    elif "Safari" in user_agent and "Chrome" not in user_agent:
+        browser = "Safari"
+    elif "Firefox" in user_agent:
+        browser = "Firefox"
+    elif "Edge" in user_agent or "Edg" in user_agent:
+        browser = "Edge"
+        
+    # Simple OS detection
+    os_name = "Other"
+    if "Windows" in user_agent:
+        os_name = "Windows"
+    elif "Macintosh" in user_agent:
+        os_name = "macOS"
+    elif "Linux" in user_agent:
+        os_name = "Linux"
+    elif "Android" in user_agent:
+        os_name = "Android"
+    elif "iPhone" in user_agent or "iPad" in user_agent:
+        os_name = "iOS"
+        
+    return {
+        "ip_address": ip_address,
+        "browser": browser,
+        "os": os_name,
+        "user_agent": user_agent,
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+def save_visitor_data(data):
+    """Write visitor records locally to CSV and asynchronously post to Google Sheets webhook."""
+    # 1. Local backup to CSV
+    try:
+        local_csv = ROOT / "visitors.csv"
+        df_new = pd.DataFrame([data])
+        if local_csv.exists():
+            try:
+                df_existing = pd.read_csv(local_csv)
+                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+                df_combined.to_csv(local_csv, index=False)
+            except Exception:
+                df_new.to_csv(local_csv, index=False)
+        else:
+            df_new.to_csv(local_csv, index=False)
+    except Exception as e:
+        print(f"Failed to log visitor details locally: {e}")
+        
+    # 2. Cloud Webhook integration (e.g. Google Sheet script Web App)
+    webhook_url = os.getenv("VISITOR_WEBHOOK_URL", "")
+    if webhook_url:
+        try:
+            req = urllib.request.Request(
+                webhook_url,
+                data=json.dumps(data).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                response.read()
+        except Exception as e:
+            print(f"Failed to post data to visitor webhook: {e}")
+
 
 # Page configuration
 st.set_page_config(
@@ -286,6 +370,8 @@ if "final_state" not in st.session_state:
     st.session_state.final_state = None
 if "run_logs" not in st.session_state:
     st.session_state.run_logs = []
+if "user_info" not in st.session_state:
+    st.session_state.user_info = None
 
 # Sidebar Controls
 st.sidebar.title("🛠️ Configuration")
@@ -334,6 +420,7 @@ if provider == "gemini":
         type="password",
         help="Leave blank to use the system key (if access password is valid)."
     )
+    st.sidebar.markdown("<p style='font-size:0.78rem; color:#A0AEC0; margin-top:-12px; margin-bottom:12px;'>Get a free Gemini API key from <a href='https://aistudio.google.com/' target='_blank' style='color:#4FD6C4;'>Google AI Studio</a>.</p>", unsafe_allow_html=True)
     if custom_google_key:
         os.environ["GOOGLE_API_KEY"] = custom_google_key
     elif env_google_key and access_granted:
@@ -368,6 +455,15 @@ max_retries = st.sidebar.slider(
 
 st.sidebar.markdown("---")
 st.sidebar.caption("🌩️ **Nimbus AutoML Platform** · Premium Multi-Agent Pipeline")
+
+# GitHub Star CTA
+st.sidebar.markdown("""
+<div style="background: rgba(139, 127, 214, 0.08); border: 1px solid rgba(139, 127, 214, 0.2); border-radius: 8px; padding: 12px; margin-top: 15px; text-align: center;">
+    <p style="margin: 0; font-size: 0.85rem; color: #E2E8F0; font-weight: 500;">⭐ Enjoying Nimbus?</p>
+    <p style="margin: 4px 0 0 0; font-size: 0.8rem;"><a href="https://github.com/shivansh-magnus/nimbus" target="_blank" style="color: #4FD6C4; text-decoration: none; font-weight: 600;">Star the repo on GitHub!</a></p>
+</div>
+""", unsafe_allow_html=True)
+
 
 # Main Header
 st.markdown("""
@@ -602,6 +698,44 @@ if st.session_state.df is not None:
 
 # Post-completion dashboard
 if st.session_state.pipeline_completed and st.session_state.final_state is not None:
+    # Check if visitor is registered, if not, show the form in a glassmorphic card
+    if st.session_state.user_info is None:
+        st.markdown("---")
+        st.markdown("""
+        <div class="glass-card" style="text-align: center; padding: 40px; margin-top: 20px;">
+            <h3 style="color: #4FD6C4; margin-bottom: 10px;">🏆 Pipeline Complete!</h3>
+            <p style="color: #A0AEC0; margin-bottom: 25px;">Your executive report and trained model bundle are ready. Please enter your details below to unlock your results.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.form("registration_form"):
+            name = st.text_input("Full Name", placeholder="e.g. Jane Doe")
+            profession = st.selectbox(
+                "Profession",
+                ["Select...", "Data Scientist / ML Engineer", "Software Developer", "Product Manager", "Student", "Researcher", "Business Analyst", "Other"]
+            )
+            submit = st.form_submit_button("Unlock Results & Downloads 🚀", use_container_width=True)
+            
+            if submit:
+                if not name or name.strip() == "":
+                    st.error("❌ Please enter your name.")
+                elif profession == "Select...":
+                    st.error("❌ Please select your profession.")
+                else:
+                    with st.spinner("Logging credentials and unlocking dashboard..."):
+                        client_info = collect_client_info()
+                        client_info["name"] = name.strip()
+                        client_info["profession"] = profession
+                        
+                        # Save visitor details
+                        save_visitor_data(client_info)
+                        
+                        # Update session state and rerun
+                        st.session_state.user_info = client_info
+                        st.success("✅ Dashboard unlocked!")
+                        st.rerun()
+        st.stop()  # Stop execution here, rendering only the registration card until unlocked
+        
     state = st.session_state.final_state
     
     st.markdown("---")
