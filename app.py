@@ -29,65 +29,119 @@ if backend_env.exists():
     load_dotenv(backend_env)
 
 def collect_client_info():
-    """Extract visitor metadata from request headers with multiple fallbacks."""
+    """Extract visitor metadata from request headers with extensive proxy scanning and GeoIP resolution."""
     headers = {}
     
-    # Try the official st.context API first (modern Streamlit)
+    # 1. Try the official st.context API first (modern Streamlit)
     if hasattr(st, "context") and hasattr(st.context, "headers"):
         try:
             headers = st.context.headers or {}
         except Exception:
             pass
             
-    # Fallback to the legacy/internal websocket headers path
+    # 2. Try the legacy/internal websocket headers path as a fallback
     if not headers:
         try:
             from streamlit.web.server.websocket_headers import _get_websocket_headers
             headers = _get_websocket_headers() or {}
         except Exception:
             pass
-            
-    # Extract IP address (checking standard proxy forwarding headers)
-    ip_address = headers.get("X-Forwarded-For", "")
-    if not ip_address:
-        ip_address = headers.get("Cf-Connecting-Ip", "127.0.0.1")
-        
-    if "," in ip_address:
-        ip_address = ip_address.split(",")[0].strip()
-        
-    user_agent = headers.get("User-Agent", "unknown")
+
+    # Normalize keys to lowercase for robust case-insensitive access
+    headers_lower = {k.lower(): v for k, v in headers.items()}
     
-    # Simple browser detection
-    browser = "Other"
-    if "Chrome" in user_agent and "Safari" in user_agent and "Edge" not in user_agent and "Edg" not in user_agent:
-        browser = "Chrome"
-    elif "Safari" in user_agent and "Chrome" not in user_agent:
-        browser = "Safari"
-    elif "Firefox" in user_agent:
-        browser = "Firefox"
-    elif "Edge" in user_agent or "Edg" in user_agent:
-        browser = "Edge"
+    # Scan standard proxy headers for client public IP
+    ip_headers = [
+        "x-forwarded-for",
+        "cf-connecting-ip",
+        "x-real-ip",
+        "client-ip",
+        "true-client-ip",
+        "x-client-ip",
+        "forwarded"
+    ]
+    
+    ip_address = "127.0.0.1"
+    for h in ip_headers:
+        val = headers_lower.get(h, "")
+        if val:
+            if "," in val:
+                # If multiple hops, first one is the client
+                ip_address = val.split(",")[0].strip()
+            else:
+                ip_address = val.strip()
+            break
+
+    # Extract user agent, preferred language, and referrer
+    user_agent = headers_lower.get("user-agent", "unknown")
+    language = headers_lower.get("accept-language", "unknown")
+    if "," in language:
+        language = language.split(",")[0].strip()
         
-    # Simple OS detection
+    referrer = headers_lower.get("referer", "direct")
+    
+    # Browser detection
+    browser = "Other"
+    ua = user_agent.lower()
+    if "edg/" in ua or "edge" in ua:
+        browser = "Edge"
+    elif "chrome" in ua and "safari" in ua:
+        browser = "Chrome"
+    elif "safari" in ua and "chrome" not in ua:
+        browser = "Safari"
+    elif "firefox" in ua:
+        browser = "Firefox"
+    elif "opera" in ua or "opr/" in ua:
+        browser = "Opera"
+        
+    # OS detection
     os_name = "Other"
-    if "Windows" in user_agent:
+    if "windows" in ua:
         os_name = "Windows"
-    elif "Macintosh" in user_agent:
+    elif "macintosh" in ua or "mac os x" in ua:
         os_name = "macOS"
-    elif "Linux" in user_agent:
+    elif "linux" in ua:
         os_name = "Linux"
-    elif "Android" in user_agent:
+    elif "android" in ua:
         os_name = "Android"
-    elif "iPhone" in user_agent or "iPad" in user_agent:
+    elif "iphone" in ua or "ipad" in ua:
         os_name = "iOS"
+
+    # Resolve Geolocation (Country, City, Region, ISP) using free ip-api.com
+    country = "Unknown"
+    city = "Unknown"
+    region = "Unknown"
+    isp = "Unknown"
+    
+    if ip_address and ip_address not in ["127.0.0.1", "localhost", "::1"]:
+        try:
+            url = f"http://ip-api.com/json/{ip_address}"
+            req = urllib.request.Request(url, headers={"User-Agent": "urllib-client"})
+            with urllib.request.urlopen(req, timeout=3) as response:
+                geo_data = json.loads(response.read().decode("utf-8"))
+                if geo_data.get("status") == "success":
+                    country = geo_data.get("country", "Unknown")
+                    city = geo_data.get("city", "Unknown")
+                    region = geo_data.get("regionName", "Unknown")
+                    isp = geo_data.get("isp", "Unknown")
+        except Exception:
+            # Silently fallback to Unknown if geoip resolver fails/times out
+            pass
         
     return {
         "ip_address": ip_address,
+        "country": country,
+        "city": city,
+        "region": region,
+        "isp": isp,
         "browser": browser,
         "os": os_name,
+        "language": language,
+        "referrer": referrer,
         "user_agent": user_agent,
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
+
 
 def save_visitor_data(data):
     """Write visitor records locally to CSV and asynchronously post to Google Sheets webhook."""
